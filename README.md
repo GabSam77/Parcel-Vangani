@@ -86,13 +86,14 @@ sectionPages: {
 alwaysLast: [16],                 // methodology
 ```
 
-3. What the app adds to the assembled PDF (all in `js/config.js`):
-   - `coverStamp`: a "Report configuration" block on the cover (asset type, sections, date, reference).
-   - `contents`: fades out the rows of the contents table for sections that weren't selected.
-     `rows` holds each row's top/bottom position in points, so update it if your contents page changes.
-   - `pageNumbers`: covers the original "Page X of 16" footer and rewrites it for the new page count.
-   Set `enabled: false` on any of these to switch it off.
-4. If you change section names, descriptions or page counts shown in the UI, edit `PF.sections` in `js/data.js`.
+3. The app appends a generated A4 configuration page with the selected asset type, sections,
+   location, land boundary, generated date and reference. It does not stamp this information
+   over the source cover.
+4. Source-page `contents` masks and `pageNumbers` replacement are disabled by default. To use
+   either feature, configure its coordinates for the current PDF template and set both its
+   `templateId` and the top-level `templateId` in `js/config.js` to the same explicit value.
+   Coordinates are never applied when the IDs do not match.
+5. If you change section names, descriptions or page counts shown in the UI, edit `PF.sections` in `js/data.js`.
 
 ## 4b. HDFC Capital branding
 

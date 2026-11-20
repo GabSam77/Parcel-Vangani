@@ -32,25 +32,19 @@ PF.config = {
   /* Pages always appended at the end. Here: 18 = methodology. */
   alwaysLast: [18],
 
-  /* Writes the chosen asset type, sections, date and reference on the cover,
-     in the empty area under the title block. PDF points from bottom-left. */
-  coverStamp: {
+  /* A separate generated A4 page carries the current report metadata. */
+  configurationPage: {
     enabled: true,
-    page: 1,
-    x: 45,
-    y: 160,
-    width: 505,
-    size: 9.5,
-    lineGap: 16,
     color: [0.17, 0.20, 0.27],
     labelColor: [0.54, 0.58, 0.64],
-    accent: [0.63, 0.14, 0.17],   // crimson, matches the report
+    accent: [0.63, 0.14, 0.17],
   },
 
   /* Contents page: rows for sections that were NOT chosen are faded out.
      rows = [top, bottom] of each table row, in points from the top of the page. */
   contents: {
-    enabled: true,
+    enabled: false,
+    templateId: null,
     page: 2,
     x0: 44, x1: 551, labelX: 97, labelAtBottom: true,
     labelColor: [0.63, 0.14, 0.17],
@@ -67,7 +61,8 @@ PF.config = {
   /* Footer page numbers: the original "Page X of 18" is covered and rewritten
      so numbering matches the assembled report. */
   pageNumbers: {
-    enabled: true,
+    enabled: false,
+    templateId: null,
     skip: [1],                 // source pages without a page number (cover)
     cover: [488, 23, 64, 16],  // white box over the old number: x, y, w, h
     right: 550.4, y: 28.6, size: 7.5,

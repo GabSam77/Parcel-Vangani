@@ -2,7 +2,7 @@
    Site Intelligence — report viewer
    1. Loads the master PDF (PF.config.reportPdf)
    2. Uses pdf-lib to copy only the pages for the chosen sections
-   3. Stamps the cover with the property type, site and date
+   3. Adds a generated configuration page
    4. Renders the result with pdf.js into a custom viewer
    ========================================================================= */
 
@@ -10,7 +10,7 @@
   const $ = (s, r = document) => r.querySelector(s);
   const $$ = (s, r = document) => Array.from(r.querySelectorAll(s));
   const R = PF.report = {};
-  let pdfjs = null, pdfDoc = null, bytes = null, builtKey = null, zoom = .4, toc = [], renderToken = 0;
+  let pdfjs = null, pdfDoc = null, bytes = null, builtKey = null, zoom = .4, toc = [], renderToken = 0, mainRenderTask = null;
 
   const abs = p => new URL(p, location.href).href;
   const loadScript = src => new Promise((res, rej) => { const s = document.createElement('script'); s.src = src; s.onload = res; s.onerror = () => rej(new Error('Could not load ' + src)); document.head.appendChild(s); });
@@ -28,6 +28,52 @@
         pdfjs.GlobalWorkerOptions.workerSrc = abs(PF.config.vendor.pdfjsWorker);
       }
     }
+  }
+
+  /* Repair the old WeasyPrint font descriptor metrics found in some source
+     reports. Only values far outside normal 1000-em units are changed. */
+  function sanitizeMalformedFontMetrics(doc, { diagnostics = false, warn = true } = {}) {
+    const { PDFName, PDFNumber, PDFArray, PDFDict } = PDFLib;
+    const names = Object.fromEntries(['Type', 'FontDescriptor', 'Ascent', 'Descent', 'CapHeight', 'FontBBox'].map(k => [k, PDFName.of(k)]));
+    let repaired = 0, repairedDescriptors = 0;
+    const numberValue = value => value instanceof PDFNumber ? value.asNumber() : null;
+
+    for (const [, obj] of doc.context.enumerateIndirectObjects()) {
+      if (!(obj instanceof PDFDict)) continue;
+      const type = obj.get(names.Type);
+      if (!(type instanceof PDFName) || type.asString() !== '/FontDescriptor') continue;
+      const changed = [];
+
+      for (const key of ['Ascent', 'Descent', 'CapHeight']) {
+        const current = obj.get(names[key]), value = numberValue(current);
+        if (value === null || Math.abs(value) <= 10000) continue;
+        const fixed = value / 1000;
+        obj.set(names[key], PDFNumber.of(fixed));
+        repaired++;
+        changed.push(`${key} ${value} -> ${fixed}`);
+      }
+
+      const bbox = obj.get(names.FontBBox);
+      const resolved = bbox && doc.context.lookup(bbox);
+      if (resolved instanceof PDFArray && resolved.size() === 4) {
+        const yChanges = [];
+        for (const index of [1, 3]) {
+          const current = resolved.get(index), value = numberValue(current);
+          if (value === null || Math.abs(value) <= 10000) continue;
+          const fixed = value / 1000;
+          resolved.set(index, PDFNumber.of(fixed));
+          repaired++;
+          yChanges.push(`${index === 1 ? 'yMin' : 'yMax'} ${value} -> ${fixed}`);
+        }
+        if (yChanges.length) changed.push(`FontBBox ${yChanges.join(', ')}`);
+      }
+      if (changed.length) repairedDescriptors++;
+      if (diagnostics && changed.length) {
+        console.debug(`Repaired malformed FontDescriptor: ${changed.join('; ')}`);
+      }
+    }
+    if (warn && repaired) console.warn(`Repaired ${repairedDescriptors} malformed FontDescriptor(s) (${repaired} metric value(s)).`);
+    return repairedDescriptors;
   }
 
   /* WinAnsi-safe text for the standard Helvetica font */
@@ -65,15 +111,15 @@
     const outIndexOf = srcPage => order.indexOf(srcPage);
     const chosen = PF.sections.filter(s => st.sections.has(s.id));
 
-    /* 1. cover: stamp the report configuration */
-    const cs = cfg.coverStamp;
-    const coverIdx = outIndexOf(cs.page);
-    if (cs.enabled && coverIdx >= 0) {
-      const page = out.getPage(coverIdx);
+    /* 1. generated A4 configuration page; source pages remain untouched. */
+    const cs = cfg.configurationPage || {};
+    if (cs.enabled !== false) {
+      const page = out.addPage([595.28, 841.89]);
       const cat = PF.taxonomy.find(t => t.id === st.category);
       const d = new Date(), date = `${d.getDate()} ${'Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec'.split(' ')[d.getMonth()]} ${d.getFullYear()}`;
-      page.drawText('REPORT CONFIGURATION', { x: cs.x, y: cs.y, size: 8, font: bold, color: rgb(cs.accent) });
-      page.drawLine({ start: { x: cs.x, y: cs.y - 6 }, end: { x: cs.x + cs.width, y: cs.y - 6 }, thickness: 0.6, color: rgb(cs.accent) });
+      const x = 48, width = 499, top = 770, accent = cs.accent || [0.63, 0.14, 0.17];
+      page.drawText('REPORT CONFIGURATION', { x, y: top, size: 13, font: bold, color: rgb(accent) });
+      page.drawLine({ start: { x, y: top - 12 }, end: { x: x + width, y: top - 12 }, thickness: 0.8, color: rgb(accent) });
       const rows = [
         ['ASSET TYPE', `${st.subtype} (${cat ? cat.name : ''})`],
         ['SECTIONS', chosen.map(x => `${x.num} ${x.short}`).join('   ')],
@@ -82,15 +128,16 @@
         ['GENERATED', `${date}  ·  Ref ${st.ref}`],
       ];
       rows.forEach(([k, v], i) => {
-        const y = cs.y - 24 - i * cs.lineGap;
-        page.drawText(k, { x: cs.x, y, size: 7, font: bold, color: rgb(cs.labelColor) });
-        page.drawText(safe(v), { x: cs.x + 78, y, size: cs.size, font: reg, color: rgb(cs.color), maxWidth: cs.width - 78 });
+        const y = top - 42 - i * 38;
+        page.drawText(k, { x, y, size: 8, font: bold, color: rgb(cs.labelColor || [0.54, 0.58, 0.64]) });
+        page.drawText(safe(v) || '—', { x: x + 112, y, size: 10, font: reg, color: rgb(cs.color || [0.17, 0.20, 0.27]), maxWidth: width - 112 });
       });
+      entries.push({ label: 'Report configuration', num: 'INFO', start: out.getPageCount() - 1 });
     }
 
     /* 2. contents page: fade out the rows for sections that were not chosen */
     const ct = cfg.contents;
-    const ctIdx = ct && ct.enabled ? outIndexOf(ct.page) : -1;
+    const ctIdx = ct && ct.enabled && cfg.templateId && ct.templateId === cfg.templateId ? outIndexOf(ct.page) : -1;
     if (ctIdx >= 0) {
       const page = out.getPage(ctIdx), h = H(page);
       Object.entries(ct.rows).forEach(([id, [top, bottom]]) => {
@@ -103,9 +150,9 @@
 
     /* 3. footers: renumber "Page X of Y" for the assembled report */
     const pn = cfg.pageNumbers;
-    if (pn && pn.enabled) {
+    if (pn && pn.enabled && cfg.templateId && pn.templateId === cfg.templateId) {
       const total = out.getPageCount();
-      out.getPages().forEach((page, i) => {
+      out.getPages().slice(0, order.length).forEach((page, i) => {
         if (pn.skip.includes(order[i])) return;
         const [rx, ry, rw, rh] = pn.cover;
         page.drawRectangle({ x: rx, y: ry, width: rw, height: rh, color: PDFLib.rgb(1, 1, 1) });
@@ -115,12 +162,42 @@
     }
     out.setTitle(safe(`Land Parcel Feasibility Report - ${st.subtype} - ${st.ref}`));
     out.setAuthor('HDFC Capital');
+    sanitizeMalformedFontMetrics(out, { diagnostics: cfg.pdfDiagnostics === true });
     bytes = await out.save();
+    // Verify the serialized bytes. If serialization/import changed the object
+    // graph, repair the parsed output and serialize once more.
+    let serialized = await PDFLib.PDFDocument.load(bytes);
+    if (sanitizeMalformedFontMetrics(serialized, { diagnostics: false, warn: false })) {
+      bytes = await serialized.save();
+      serialized = await PDFLib.PDFDocument.load(bytes);
+    }
+    if (hasMalformedFontMetrics(serialized)) throw new Error('Malformed font metrics remain in the generated PDF.');
     toc = entries;
+  }
+
+  function hasMalformedFontMetrics(doc) {
+    const { PDFName, PDFNumber, PDFArray, PDFDict } = PDFLib;
+    const typeKey = PDFName.of('Type'), descriptorName = PDFName.of('FontDescriptor');
+    for (const [, obj] of doc.context.enumerateIndirectObjects()) {
+      if (!(obj instanceof PDFDict)) continue;
+      const type = obj.get(typeKey);
+      if (!(type instanceof PDFName) || type.asString() !== '/FontDescriptor') continue;
+      for (const key of ['Ascent', 'Descent', 'CapHeight']) {
+        const n = obj.get(PDFName.of(key));
+        if (n instanceof PDFNumber && Math.abs(n.asNumber()) > 10000) return true;
+      }
+      const bbox = doc.context.lookup(obj.get(PDFName.of('FontBBox')));
+      if (bbox instanceof PDFArray) for (const i of [1, 3]) {
+        const n = bbox.get(i);
+        if (n instanceof PDFNumber && Math.abs(n.asNumber()) > 10000) return true;
+      }
+    }
+    return false;
   }
 
   async function renderPages() {
     const token = ++renderToken;
+    if (mainRenderTask) { try { mainRenderTask.cancel(); } catch (_) {} mainRenderTask = null; }
     const wrap = $('#rvPages');
     wrap.innerHTML = '';
     const first = await pdfDoc.getPage(1);
@@ -132,9 +209,14 @@
       const page = await pdfDoc.getPage(i), vp = page.getViewport({ scale: scale * dpr });
       const div = document.createElement('div'); div.className = 'rv-page-wrap'; div.dataset.page = i;
       div.style.animationDelay = Math.min(i, 6) * 60 + 'ms';
-      const c = document.createElement('canvas'); c.width = vp.width; c.height = vp.height; c.style.width = vp.width / dpr + 'px';
+      const c = document.createElement('canvas'); c.width = Math.ceil(vp.width); c.height = Math.ceil(vp.height);
+      c.style.width = vp.width / dpr + 'px'; c.style.height = vp.height / dpr + 'px';
       div.appendChild(c); wrap.appendChild(div);
-      await page.render({ canvasContext: c.getContext('2d'), viewport: vp }).promise;
+      const task = page.render({ canvasContext: c.getContext('2d'), viewport: vp });
+      mainRenderTask = task;
+      try { await task.promise; }
+      catch (err) { if (token !== renderToken || err && err.name === 'RenderingCancelledException') return; throw err; }
+      if (mainRenderTask === task) mainRenderTask = null;
     }
     observePages();
   }
@@ -144,7 +226,8 @@
     for (let i = 1; i <= pdfDoc.numPages; i++) {
       const page = await pdfDoc.getPage(i), vp = page.getViewport({ scale: .22 });
       const b = document.createElement('button'); b.dataset.page = i; b.setAttribute('aria-label', 'Go to page ' + i);
-      const c = document.createElement('canvas'); c.width = vp.width; c.height = vp.height;
+      const c = document.createElement('canvas'); c.width = Math.ceil(vp.width); c.height = Math.ceil(vp.height);
+      c.style.width = vp.width + 'px'; c.style.height = vp.height + 'px';
       b.appendChild(c); b.insertAdjacentHTML('beforeend', `<span>${i}</span>`); t.appendChild(b);
       await page.render({ canvasContext: c.getContext('2d'), viewport: vp }).promise;
     }
@@ -225,6 +308,7 @@
     let rt; addEventListener('resize', () => { if (document.body.dataset.route !== 'report' || !pdfDoc) return; clearTimeout(rt); rt = setTimeout(renderPages, 250); });
   };
   R.bytes = () => bytes;
+  R.sanitizeMalformedFontMetrics = sanitizeMalformedFontMetrics;
   R.onShow = () => { build(); };
   document.addEventListener('click', e => {
     if (e.target.closest('#rvEditLoc')) { PF.state.step = 2; PF.go('build'); }
